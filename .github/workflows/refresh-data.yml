@@ -1,9 +1,18 @@
 name: Refresh NSW SSDA data
 
 on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Choose the data refresh"
+        required: true
+        type: choice
+        options:
+          - full
+          - recent
+        default: full
   schedule:
     - cron: "0 16 * * *"
-  workflow_dispatch:
 
 permissions:
   contents: write
@@ -11,20 +20,32 @@ permissions:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out repository
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - run: pip install -r requirements.txt
+      - name: Install dependencies
+        run: pip install -r requirements.txt
 
-      - run: python sync.py --pages 10 --details --include-modifications
+      - name: Refresh NSW SSDA data
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            python sync.py --recent
+          elif [ "${{ inputs.mode }}" = "full" ]; then
+            python sync.py --full
+          else
+            python sync.py --recent
+          fi
 
-      - run: |
+      - name: Save updated database
+        run: |
           git config user.name "WPH SSDA Tracker"
           git config user.email "actions@github.com"
           git add data/tracker.sqlite3
