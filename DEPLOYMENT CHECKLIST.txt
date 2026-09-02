@@ -1,0 +1,21 @@
+WEB DEPLOYMENT — WEIR PHILLIPS HERITAGE SSDA TRACKER
+
+GITHUB
+1. Create a private GitHub repository.
+2. Upload all files in this folder.
+3. Go to Actions.
+4. Run "Refresh NSW SSDA data" manually once.
+5. Wait for the database refresh to finish.
+
+STREAMLIT COMMUNITY CLOUD
+1. Sign in with the GitHub account.
+2. Create a new app.
+3. Select the WPH repository.
+4. Main file: app.py.
+5. Deploy.
+
+After deployment, the app can be opened from any browser.
+The GitHub Action refreshes the NSW project database daily.
+
+NO API KEY
+The map uses OpenStreetMap tiles directly. No map API key is required.
