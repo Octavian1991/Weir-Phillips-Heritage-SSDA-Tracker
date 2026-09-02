@@ -80,60 +80,82 @@ def nearest_card(a):
 
 
 def listing(html):
-    """Parse the public listing cards into structured project records.
+    """Parse NSW Planning Portal project cards.
 
-    The NSW Portal exposes each card in a predictable order:
-    application number, status, development/assessment type, LGA, title,
-    address, then the Read more link. Parsing those fields here means the
-    database remains useful even if an individual detail page is unavailable.
+    The public listing is deliberately treated as the authoritative source for
+    the core fields. Each card is presented as:
+        application number / status / development type / LGA / title / address
+    followed by a Read more link. We parse that sequence directly rather than
+    relying on heading tags, which have changed across Portal revisions.
     """
     soup = BeautifulSoup(html, "html.parser")
     out = []
 
     for a in soup.find_all("a", href=True):
-        if clean(a.get_text(" ", strip=True)).lower() != "read more":
+        if clean(a.get_text(" ", strip=True)).casefold() != "read more":
             continue
-        card = nearest_card(a)
+
+        # Find the smallest ancestor that represents one card. It should contain
+        # exactly one Read more link and a recognisable application number.
+        card = None
+        cur = a
+        for _ in range(10):
+            cur = cur.parent if cur else None
+            if not cur:
+                break
+            read_more = cur.find_all("a", href=True)
+            if sum(clean(x.get_text(" ", strip=True)).casefold() == "read more" for x in read_more) != 1:
+                continue
+            txt = clean(cur.get_text(" ", strip=True))
+            if project_number_from(txt):
+                card = cur
+                break
         if not card:
             continue
 
         lines = []
         for value in card.stripped_strings:
             value = clean(value)
-            if value and value.lower() != "read more" and value not in lines:
+            if value and value.casefold() != "read more" and value not in lines:
                 lines.append(value)
 
-        number = next((x for x in lines if re.fullmatch(r"(?:SSD|SSI|MP|DA)[-_A-Za-z0-9]+", x, re.I)), "")
+        number = next(
+            (x for x in lines if re.fullmatch(r"(?:SSD|SSI|MP|DA)[-_A-Za-z0-9]+", x, re.I)),
+            "",
+        )
         if not number:
             number = project_number_from(clean(card.get_text(" ", strip=True)))
         if not number:
             continue
 
+        # Locate the known status and development type, then use the Portal's
+        # stable positional sequence for LGA, title and address.
         status = next((x for x in lines if x in STATUSES), "")
         dtype = next((x for x in lines if x in DEVELOPMENT_TYPES), "")
+        lga = title = address = ""
 
-        title = ""
-        heading = card.find(["h2", "h3", "h4"])
-        if heading:
-            title = clean(heading.get_text(" ", strip=True))
+        if status and dtype:
+            si = lines.index(status)
+            di = next((i for i in range(si + 1, len(lines)) if lines[i] == dtype), -1)
+            if di >= 0:
+                if di + 1 < len(lines):
+                    lga = lines[di + 1]
+                if di + 2 < len(lines):
+                    title = lines[di + 2]
+                if di + 3 < len(lines):
+                    address = lines[di + 3]
 
-        lga = ""
-        address = ""
-        if status and dtype and dtype in lines:
-            i = lines.index(dtype)
-            if i + 1 < len(lines):
-                lga = lines[i + 1]
-
-        if title and title in lines:
+        # Defensive fallbacks for markup variations.
+        if not title:
+            heading = card.find(["h2", "h3", "h4"])
+            if heading:
+                heading_text = clean(heading.get_text(" ", strip=True))
+                if heading_text and heading_text != number:
+                    title = heading_text
+        if not address and title and title in lines:
             ti = lines.index(title)
             if ti + 1 < len(lines):
                 address = lines[ti + 1]
-        elif status and dtype and dtype in lines:
-            i = lines.index(dtype)
-            if i + 2 < len(lines):
-                title = lines[i + 2]
-            if i + 3 < len(lines):
-                address = lines[i + 3]
 
         href = urljoin(BASE, a["href"])
         out.append({

@@ -135,12 +135,20 @@ div[data-testid="stSidebar"] .block-container {
     overflow-x:hidden;
 }
 /* Keep long filter lists usable on smaller screens. */
-div[data-testid="stSidebar"] [data-baseweb="popover"] {
+/* Streamlit renders select popovers outside the sidebar DOM. Keep long LGA/status
+   lists within the viewport and make the list itself scrollable. */
+div[data-baseweb="popover"] {
     max-height:70vh !important;
 }
-div[data-testid="stSidebar"] [role="listbox"] {
+div[data-baseweb="popover"] [role="listbox"] {
     max-height:55vh !important;
+    overflow-y:auto !important;
 }
+div[data-baseweb="popover"] [data-baseweb="menu"] {
+    max-height:55vh !important;
+    overflow-y:auto !important;
+}
+
 div[data-testid="stSidebar"] label {
     font-weight:600;
 }
@@ -405,6 +413,8 @@ if len(f):
     st.markdown(f"**Address:** {clean(p.address) or '—'}")
     if clean(p.description):
         st.markdown(f"**Proposal:** {clean(p.description)}")
+    else:
+        st.caption("Additional project details are available on the official NSW Planning Portal record below. Historical imports prioritise complete project coverage; detailed fields are enriched for recently updated projects.")
     a,b,c=st.columns(3)
     a.metric("Dwellings",p.dwellings if p.dwellings else "—")
     b.metric("Height",p.height if p.height else "—")
