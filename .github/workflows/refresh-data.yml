@@ -44,10 +44,19 @@ jobs:
             python sync.py --recent
           fi
 
-      - name: Save updated database
+         - name: Save updated database
         run: |
           git config user.name "WPH SSDA Tracker"
           git config user.email "actions@github.com"
+
           git add data/tracker.sqlite3
-          git diff --cached --quiet || git commit -m "Refresh NSW SSDA data"
-          git push
+
+          if git diff --cached --quiet; then
+            echo "No data changes."
+            exit 0
+          fi
+
+          git commit -m "Refresh NSW SSDA data"
+
+          git pull --rebase origin main
+          git push origin main
