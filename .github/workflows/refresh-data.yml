@@ -21,7 +21,7 @@ permissions:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 60
 
     steps:
 
@@ -31,7 +31,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
@@ -43,11 +43,11 @@ jobs:
       - name: Refresh NSW SSDA data
         run: |
           if [ "${{ github.event_name }}" = "schedule" ]; then
-            python sync.py --recent --details --include-modifications
+            python sync.py --recent
           elif [ "${{ inputs.mode }}" = "full" ]; then
-            python sync.py --full --details --include-modifications
+            python sync.py --full
           else
-            python sync.py --recent --details --include-modifications
+            python sync.py --recent
           fi
 
       - name: Save updated database
