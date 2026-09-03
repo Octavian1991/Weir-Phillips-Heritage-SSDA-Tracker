@@ -234,13 +234,19 @@ def detail(html, row):
             lon = float(mn.group(1))
             break
 
-    dwell = height = cost = None
+    dwell = height = cost = gfa = affordable = None
     m = re.search(r"\b(\d[\d,]*)\s+(?:residential\s+)?(?:units|dwellings)\b", desc, re.I)
     if m:
         dwell = float(m.group(1).replace(",", ""))
     m = re.search(r"\b(\d+(?:\.\d+)?)\s*(?:storeys|stories)\b", desc, re.I)
     if m:
         height = float(m.group(1))
+    m = re.search(r"(?:gross floor area|GFA)[^\d]{0,30}(\d[\d,]*(?:\.\d+)?)\s*(?:m2|m²|sqm|square metres|square meters)?", desc, re.I)
+    if m:
+        gfa = float(m.group(1).replace(",", ""))
+    m = re.search(r"(?:affordable housing|affordable dwellings|affordable homes)[^\d]{0,40}(\d[\d,]*)", desc, re.I)
+    if m:
+        affordable = float(m.group(1).replace(",", ""))
     m = re.search(r"\$\s*([\d,.]+)\s*(million|billion)?", desc, re.I)
     if m:
         cost = float(m.group(1).replace(",", "")) * (
@@ -270,7 +276,8 @@ def detail(html, row):
         "estimated_cost": cost,
         "dwellings": dwell,
         "height": height,
-        "affordable_housing": None,
+        "gfa": gfa,
+        "affordable_housing": affordable,
         "applicant": "",
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -295,6 +302,7 @@ def listing_detail(row):
         "estimated_cost": None,
         "dwellings": None,
         "height": None,
+        "gfa": None,
         "affordable_housing": None,
         "applicant": "",
         "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -306,9 +314,12 @@ def init_db(c):
         project_number TEXT PRIMARY KEY,title TEXT,status TEXT,assessment_type TEXT,
         development_type TEXT,lga TEXT,address TEXT,description TEXT,url TEXT,decision TEXT,
         determination_date TEXT,last_modified TEXT,lat REAL,lon REAL,estimated_cost REAL,
-        dwellings REAL,height REAL,affordable_housing REAL,applicant TEXT,updated_at TEXT)""")
+        dwellings REAL,height REAL,gfa REAL,affordable_housing REAL,applicant TEXT,updated_at TEXT)""")
     c.execute("""CREATE TABLE IF NOT EXISTS status_history(
         id INTEGER PRIMARY KEY AUTOINCREMENT,project_number TEXT,status TEXT,observed_at TEXT)""")
+    existing = {r[1] for r in c.execute("PRAGMA table_info(projects)").fetchall()}
+    if "gfa" not in existing:
+        c.execute("ALTER TABLE projects ADD COLUMN gfa REAL")
 
 
 def save_project(c, d):
@@ -319,7 +330,7 @@ def save_project(c, d):
         "project_number", "title", "status", "assessment_type", "development_type",
         "lga", "address", "description", "url", "decision", "determination_date",
         "last_modified", "lat", "lon", "estimated_cost", "dwellings", "height",
-        "affordable_housing", "applicant", "updated_at",
+        "gfa", "affordable_housing", "applicant", "updated_at",
     ]
 
     if old:
@@ -338,7 +349,7 @@ def save_project(c, d):
 
     c.execute("""INSERT INTO projects(
         project_number,title,status,assessment_type,development_type,lga,address,description,url,decision,
-        determination_date,last_modified,lat,lon,estimated_cost,dwellings,height,affordable_housing,applicant,updated_at)
+        determination_date,last_modified,lat,lon,estimated_cost,dwellings,height,gfa,affordable_housing,applicant,updated_at)
         VALUES(:project_number,:title,:status,:assessment_type,:development_type,:lga,:address,:description,:url,:decision,
         :determination_date,:last_modified,:lat,:lon,:estimated_cost,:dwellings,:height,:affordable_housing,:applicant,:updated_at)
         ON CONFLICT(project_number) DO UPDATE SET
@@ -347,7 +358,7 @@ def save_project(c, d):
         description=excluded.description,url=excluded.url,decision=excluded.decision,
         determination_date=excluded.determination_date,last_modified=excluded.last_modified,
         lat=excluded.lat,lon=excluded.lon,estimated_cost=excluded.estimated_cost,
-        dwellings=excluded.dwellings,height=excluded.height,affordable_housing=excluded.affordable_housing,
+        dwellings=excluded.dwellings,height=excluded.height,gfa=excluded.gfa,affordable_housing=excluded.affordable_housing,
         applicant=excluded.applicant,updated_at=excluded.updated_at""", d)
 
     old_status = old[2] if old else ""
