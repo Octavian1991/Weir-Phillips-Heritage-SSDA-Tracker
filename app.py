@@ -115,6 +115,14 @@ if df.empty:
     st.stop()
 
 # ---------- Sidebar ----------
+# Apply an LGA selected from the map BEFORE the multiselect widget is
+# instantiated. Streamlit does not allow changing a widget's session-state
+# value after that widget has been created during the same script run.
+if "pending_lga_filter" in st.session_state:
+    pending_lga = st.session_state.pop("pending_lga_filter")
+    if pending_lga:
+        st.session_state["lga_filter"] = [pending_lga]
+
 with st.sidebar:
     st.markdown('<div class="section-label">Filters</div>', unsafe_allow_html=True)
     st.divider()
@@ -347,7 +355,9 @@ with map_col:
             # markers.  This prevents ordinary map clicks from changing the
             # table unexpectedly.
             if nearest is not None and nearest_dist is not None and nearest_dist < 0.0005:
-                st.session_state["lga_filter"] = [nearest]
+                # Queue the filter for the next script run. It must be applied
+                # before st.multiselect("LGA", ...) is instantiated.
+                st.session_state["pending_lga_filter"] = nearest
                 st.session_state.pop("project_table", None)
                 st.session_state.pop("table_search", None)
                 st.rerun()
