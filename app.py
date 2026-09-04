@@ -290,8 +290,10 @@ with map_col:
             else:
                 exact += 1
             bounds.append([lat, lon])
-            sk = norm(p.get("status", ""))
-            fill = "#c95b22" if "exhibition" in sk else "#e7a06d" if "assessment" in sk else "#9d9d9d" if "determination" in sk or "approved" in sk else "#55514d"
+            # WPH brand orange for all individual project dots. Keeping one
+            # consistent colour makes the project layer visually clearer;
+            # status remains available in the popup and table.
+            fill = "#c95b22"
             url = clean(p.get("url"))
             link_html = f'<br><a href="{url}" target="_blank">Open NSW Planning Portal record ↗</a>' if url else ''
             popup_html = (
