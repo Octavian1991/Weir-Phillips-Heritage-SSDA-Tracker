@@ -284,7 +284,17 @@ with map_col:
             bounds.append([lat, lon])
             sk = norm(p.get("status", ""))
             fill = "#c95b22" if "exhibition" in sk else "#e7a06d" if "assessment" in sk else "#9d9d9d" if "determination" in sk or "approved" in sk else "#55514d"
-            popup = f"<b>{clean(p.get('project_number'))}</b><br>{clean(p.get('title'))}<br>{clean(p.get('lga'))}<br>Status: {clean(p.get('status'))}<br><small>{'Approximate LGA location' if not precise else 'Project coordinates'}</small>"
+            url = clean(p.get("url"))
+            link_html = f'<br><a href="{url}" target="_blank">Open NSW Planning Portal record ↗</a>' if url else ''
+            popup_html = (
+                f"<div style='min-width:220px'><b>{clean(p.get('project_number'))}</b>"
+                f"<br>{clean(p.get('title'))}"
+                f"<br><small>{clean(p.get('lga'))}</small>"
+                f"<br>Status: {clean(p.get('status'))}"
+                f"<br><small>{'Approximate LGA location' if not precise else 'Project coordinates'}</small>"
+                f"{link_html}</div>"
+            )
+            popup = folium.Popup(popup_html, max_width=360)
             folium.CircleMarker([lat, lon], radius=5 if precise else 4, weight=1, fill=True, fill_color=fill, color=fill, fill_opacity=.8, popup=popup, tooltip=clean(p.get("project_number")), opacity=.9).add_to(cluster)
             plotted += 1
         if bounds:
@@ -337,79 +347,99 @@ if len(f):
     display["Height"] = display.get("height", "")
     display["GFA"] = display.get("gfa", "")
     display["Cost"] = display.get("estimated_cost", "")
+
     table_cols = ["Application", "Project", "Address", "LGA", "Status", "Type", "Dwellings", "Height", "GFA", "Cost"]
     table_df = display[table_cols].sort_values(["Project", "Application"], na_position="last").reset_index(drop=True)
 
-    table_col, detail_col = st.columns([1.65, 1])
-    with table_col:
-        st.caption(f"Showing {len(table_df):,} matching projects. Click a row to open its details.")
-        event = st.dataframe(
-            table_df,
-            use_container_width=True,
-            hide_index=True,
-            height=560,
-            on_select="rerun",
-            selection_mode="single-row",
-            key="project_table",
-            column_config={
-                "Application": st.column_config.TextColumn("Application", width="small"),
-                "Project": st.column_config.TextColumn("Project", width="large"),
-                "Address": st.column_config.TextColumn("Address", width="large"),
-                "LGA": st.column_config.TextColumn("LGA", width="medium"),
-                "Status": st.column_config.TextColumn("Status", width="medium"),
-                "Type": st.column_config.TextColumn("Type", width="medium"),
-                "Dwellings": st.column_config.NumberColumn("Dwellings", format="%.0f"),
-                "Height": st.column_config.NumberColumn("Height / storeys", format="%.1f"),
-                "GFA": st.column_config.NumberColumn("GFA / m²", format="%,.0f"),
-                "Cost": st.column_config.NumberColumn("Estimated cost", format="$%,.0f"),
-            },
-        )
+    # Explicit table search in addition to Streamlit's built-in dataframe search.
+    table_search = st.text_input(
+        "Search this table",
+        placeholder="Search application, project, address, LGA, status or development type…",
+        key="table_search",
+    )
+    table_view = table_df.copy()
+    if table_search:
+        needle = norm(table_search)
+        mask = pd.Series(False, index=table_view.index)
+        for col in table_cols:
+            mask |= table_view[col].map(norm).str.contains(needle, regex=False, na=False)
+        table_view = table_view[mask].reset_index(drop=True)
+
+    st.caption(f"Showing {len(table_view):,} projects in the table. Click a row to open its details. The table also has built-in sorting, column controls and search in its toolbar.")
+
+    event = st.dataframe(
+        table_view,
+        use_container_width=True,
+        hide_index=True,
+        height=560,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="project_table",
+        column_config={
+            "Application": st.column_config.TextColumn("Application", width="small"),
+            "Project": st.column_config.TextColumn("Project", width="large"),
+            "Address": st.column_config.TextColumn("Address", width="large"),
+            "LGA": st.column_config.TextColumn("LGA", width="medium"),
+            "Status": st.column_config.TextColumn("Status", width="medium"),
+            "Type": st.column_config.TextColumn("Type", width="medium"),
+            "Dwellings": st.column_config.TextColumn("Dwellings", width="small"),
+            "Height": st.column_config.TextColumn("Height / storeys", width="small"),
+            "GFA": st.column_config.TextColumn("GFA / m²", width="small"),
+            "Cost": st.column_config.TextColumn("Estimated cost", width="small"),
+        },
+    )
 
     selected_rows = list(getattr(event.selection, "rows", [])) if hasattr(event, "selection") else []
     p = None
-    if selected_rows:
-        selected_application = table_df.iloc[selected_rows[0]]["Application"]
+    if selected_rows and len(table_view):
+        selected_application = table_view.iloc[selected_rows[0]]["Application"]
         matches = f[f.project_number.astype(str).eq(str(selected_application))]
         if len(matches):
             p = matches.iloc[0]
 
-    with detail_col:
+    # Project details deliberately sit BELOW the table so the table remains full width.
+    st.write("")
+    st.markdown("### Project details")
+    if p is None:
+        st.markdown('<div class="detail-card">Select a project row above to view its details.</div>', unsafe_allow_html=True)
+    else:
         st.markdown('<div class="detail-card">', unsafe_allow_html=True)
-        if p is None:
-            st.markdown("### Project details")
-            st.markdown("Select a project row on the left to view its details here.")
-            st.markdown('<div class="small-muted">This panel stays alongside the table so you no longer need to scroll down to a separate project selector.</div>', unsafe_allow_html=True)
-        else:
-            st.markdown(f"### {clean(p.get('title')) or 'Project'}")
-            st.caption(clean(p.get('project_number')))
-            a, b = st.columns(2)
-            a.metric("Status", clean(p.get("status")) or "—")
-            b.metric("LGA", clean(p.get("lga")) or "—")
-            st.markdown(f"**Address**  \n{clean(p.get('address')) or '—'}")
-            st.markdown(f"**Assessment type**  \n{clean(p.get('assessment_type')) or '—'}")
-            st.markdown(f"**Development type**  \n{clean(p.get('development_type')) or '—'}")
-            st.divider()
-            st.markdown("**Project metrics**")
-            m1, m2 = st.columns(2)
-            m1.metric("Dwellings", clean(p.get("dwellings")) or "—")
-            m2.metric("Height / storeys", clean(p.get("height")) or "—")
-            m3, m4 = st.columns(2)
-            m3.metric("GFA / m²", clean(p.get("gfa")) or "—")
-            m4.metric("Estimated cost", clean(p.get("estimated_cost")) or "—")
-            m5, m6 = st.columns(2)
-            m5.metric("Affordable housing", clean(p.get("affordable_housing")) or "—")
-            m6.metric("Applicant", clean(p.get("applicant")) or "—")
-            st.divider()
-            st.markdown(f"**Decision**  \n{clean(p.get('decision')) or '—'}")
-            st.markdown(f"**Determination date**  \n{clean(p.get('determination_date')) or '—'}")
-            if clean(p.get("description")):
-                st.markdown("**Proposal**")
-                st.write(clean(p.get("description")))
-            if clean(p.get("url")):
-                st.link_button("Open official NSW Planning Portal record ↗", clean(p.get("url")), use_container_width=True)
+        st.markdown(f"### {clean(p.get('title')) or 'Project'}")
+        st.caption(clean(p.get('project_number')))
+
+        a, b, c = st.columns(3)
+        a.metric("Status", clean(p.get("status")) or "—")
+        b.metric("LGA", clean(p.get("lga")) or "—")
+        c.metric("Assessment type", clean(p.get("assessment_type")) or "—")
+
+        st.markdown(f"**Address**  \n{clean(p.get('address')) or '—'}")
+        st.markdown(f"**Development type**  \n{clean(p.get('development_type')) or '—'}")
+
+        st.divider()
+        st.markdown("**Project metrics**")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Dwellings", clean(p.get("dwellings")) or "—")
+        m2.metric("Height / storeys", clean(p.get("height")) or "—")
+        m3.metric("GFA / m²", clean(p.get("gfa")) or "—")
+        m4.metric("Estimated cost", clean(p.get("estimated_cost")) or "—")
+
+        m5, m6, m7 = st.columns(3)
+        m5.metric("Affordable housing", clean(p.get("affordable_housing")) or "—")
+        m6.metric("Applicant", clean(p.get("applicant")) or "—")
+        m7.metric("Determination date", clean(p.get("determination_date")) or "—")
+
+        st.divider()
+        st.markdown(f"**Decision**  \n{clean(p.get('decision')) or '—'}")
+        if clean(p.get("description")):
+            st.markdown("**Proposal**")
+            st.write(clean(p.get("description")))
+        if clean(p.get("url")):
+            st.link_button("Open official NSW Planning Portal record ↗", clean(p.get("url")), use_container_width=False)
         st.markdown('</div>', unsafe_allow_html=True)
 else:
     st.info("No projects match the current filters.")
 
 st.write("")
 st.caption("Weir Phillips Heritage · SSDA Tracker · Source: NSW Planning Portal public State Significant Applications records.")
+
+# Community Cloud hibernation note: this is a hosting-platform limitation, not an app bug.
