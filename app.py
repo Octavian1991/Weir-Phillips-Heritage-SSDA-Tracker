@@ -316,8 +316,46 @@ with map_col:
             plotted += 1
         if bounds:
             m.fit_bounds(bounds, padding=(20, 20))
-        st_folium(m, height=500, width=None, key=map_key + "-summary")
-        st.info(f"{total:,} projects match your filters. The map is showing {plotted} LGA summaries. Narrow the filters to 1,500 projects or fewer to show individual projects.")
+        # Return the coordinates of the clicked summary marker.  Because each
+        # summary marker is placed at the LGA centroid, we can map a click back
+        # to its LGA and then use the existing table/filter machinery to show
+        # the underlying projects.
+        map_state = st_folium(
+            m,
+            height=500,
+            width=None,
+            key=map_key + "-summary",
+            returned_objects=["last_object_clicked"],
+        )
+
+        clicked = map_state.get("last_object_clicked") if isinstance(map_state, dict) else None
+        if clicked and clicked.get("lat") is not None and clicked.get("lng") is not None:
+            clat = float(clicked["lat"])
+            clon = float(clicked["lng"])
+            nearest = None
+            nearest_dist = None
+            for name, count in counts.items():
+                point = next((xy for n, xy in LGA_CENTROIDS.items() if norm(n) == norm(name)), None)
+                if not point:
+                    continue
+                dist = (clat - point[0]) ** 2 + (clon - point[1]) ** 2
+                if nearest_dist is None or dist < nearest_dist:
+                    nearest = name
+                    nearest_dist = dist
+
+            # Only act on clicks that are plausibly on one of the summary
+            # markers.  This prevents ordinary map clicks from changing the
+            # table unexpectedly.
+            if nearest is not None and nearest_dist is not None and nearest_dist < 0.0005:
+                st.session_state["lga_filter"] = [nearest]
+                st.session_state.pop("project_table", None)
+                st.session_state.pop("table_search", None)
+                st.rerun()
+
+        st.info(
+            f"{total:,} projects match your filters. The map is showing {plotted} LGA summaries. "
+            "Click an LGA marker to filter the table to those projects; the map will then show the individual project markers."
+        )
 
 with side_col:
     st.markdown('<div class="result-card">', unsafe_allow_html=True)
