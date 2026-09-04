@@ -181,6 +181,120 @@ def listing(html):
     return result
 
 
+
+# NSW Spatial Services Address Location Service (GURAS-backed authoritative
+# NSW property addressing). It returns an address point in EPSG:4326.
+ADDRESS_SERVICE = "http://mapsq.six.nsw.gov.au/services/public/Address_Location"
+ROAD_TYPES = {
+    "access":"ACCS","alley":"ALLY","alleyway":"ALWY","amble":"AMBL","approach":"APP",
+    "arcade":"ARC","arterial":"ARTL","artery":"ART","avenue":"AVE","bend":"BEND",
+    "boardwalk":"BWLK","boulevard":"BVD","brace":"BRCE","brae":"BRAE","break":"BRK",
+    "broadway":"BDWY","brow":"BROW","bypass":"BYPA","byway":"BYWY","causeway":"CAUS",
+    "centre":"CTR","chase":"CH","circle":"CIR","circlet":"CLT","circuit":"CCT","circus":"CRCS",
+    "close":"CL","common":"CMMN","concourse":"CON","copse":"CPS","corner":"CNR","court":"CT",
+    "courtyard":"CTYD","cove":"COVE","crescent":"CR","crest":"CRST","cross":"CRSS","crossing":"CRSG",
+    "cul-de-sac":"CSAC","dale":"DALE","deviation":"DEVN","dip":"DIP","distributor":"DSTR","drive":"DR",
+    "driveway":"DRWY","edge":"EDGE","elbow":"ELB","end":"END","entrance":"ENT","esplanade":"ESP",
+    "expressway":"EXP","extension":"EXTN","fairway":"FAWY","firetrack":"FTRK","firetrail":"FITR","follow":"FOLW",
+    "footway":"FTWY","formation":"FORM","freeway":"FWY","frontage":"FRTG","gap":"GAP","garden":"GDN",
+    "gardens":"GDNS","gate":"GATE","glade":"GLD","glen":"GLEN","grange":"GRA","green":"GRN","grove":"GR",
+    "heights":"HTS","highroad":"HRD","highway":"HWY","hill":"HILL","interchange":"INTG","junction":"JNC",
+    "key":"KEY","lane":"LANE","laneway":"LNWY","line":"LINE","link":"LINK","lookout":"LKT","loop":"LOOP",
+    "mall":"MALL","meander":"MNDR","mews":"MEWS","motorway":"MWY","nook":"NOOK","outlook":"OTLK","parade":"PDE",
+    "parkway":"PKWY","pass":"PASS","passage":"PSGE","path":"PATH","pathway":"PHWY","piazza":"PIAZ","place":"PL",
+    "plaza":"PLZA","pocket":"PKT","point":"PNT","port":"PORT","promenade":"PROM","quadrant":"QDRT","quay":"QY",
+    "quays":"QYS","ramble":"RMBL","ramp":"RAMP","rest":"REST","retreat":"RTT","ridge":"RDGE","ring":"RING",
+    "rise":"RISE","road":"RD","roads":"RDS","rotary":"RTY","route":"RTE","row":"ROW","rue":"RUE","serviceway":"SVWY",
+    "shunt":"SHUN","spur":"SPUR","square":"SQ","stairs":"STRS","steps":"STPS","street":"ST","strip":"STRP",
+    "subway":"SBWY","tarn":"TARN","terrace":"TCE","thoroughfare":"THOR","tollway":"TLWY","top":"TOP","tor":"TOR",
+    "track":"TRK","trail":"TRL","turn":"TURN","underpass":"UPAS","vale":"VALE","viaduct":"VIAD","view":"VIEW",
+    "vista":"VSTA","walk":"WALK","walkway":"WKWY","way":"WAY","wharf":"WHRF","wynd":"WYND"
+}
+
+def parse_address_for_nsw_service(address):
+    """Extract the best single street address from a Portal address string."""
+    a = clean(address).replace("&amp;", "&")
+    if not a:
+        return None
+    # Drop country/state suffixes while retaining the suburb.
+    a = re.sub(r",?\s*(?:New South Wales|NSW|Australia)\s*$", "", a, flags=re.I)
+    # If a site has multiple addresses, use the first address as the representative point.
+    a = re.split(r"\s+&\s+|\s*;\s*", a, maxsplit=1)[0].strip()
+    parts = [clean(x) for x in a.split(",") if clean(x)]
+    if not parts:
+        return None
+
+    postcode_match = re.search(r"\b(2\d{3})\b", a)
+    postcode = postcode_match.group(1) if postcode_match else ""
+    if postcode:
+        a_no_post = re.sub(r"\b2\d{3}\b", "", a).strip(" ,")
+        parts = [clean(x) for x in a_no_post.split(",") if clean(x)]
+
+    # Usually the final comma component is the suburb. If there is no comma,
+    # find the road type and treat the text after it as the suburb.
+    suburb = parts[-1] if len(parts) >= 2 else ""
+    street = parts[0] if len(parts) >= 2 else parts[0]
+    if len(parts) == 1:
+        # e.g. "346 Panorama Avenue Bathurst"
+        m = re.search(r"\b(" + "|".join(sorted(map(re.escape, ROAD_TYPES), key=len, reverse=True)) + r")\b", street, re.I)
+        if m:
+            suburb = clean(street[m.end():])
+            street = clean(street[:m.end()])
+    if not street:
+        return None
+
+    # Extract house number, preserving ranges/suffixes where present.
+    hm = re.match(r"\s*([0-9]+[A-Za-z]?(?:\s*[-/]\s*[0-9]+[A-Za-z]?)?)\s+(.+)$", street)
+    house = hm.group(1) if hm else ""
+    road_part = hm.group(2) if hm else street
+
+    # Find the road type at the end of the street component.
+    type_match = None
+    for rt in sorted(ROAD_TYPES, key=len, reverse=True):
+        m = re.search(r"\b" + re.escape(rt) + r"\.?\s*$", road_part, re.I)
+        if m:
+            type_match = m
+            break
+    if not type_match:
+        # No standard road type: the service cannot reliably geocode this string.
+        return None
+    road_name = clean(road_part[:type_match.start()])
+    road_type = type_match.group(1) if type_match.groups() else type_match.group(0)
+    if not road_name or not suburb:
+        return None
+    return {"houseNumber": house, "roadName": road_name, "roadType": road_type, "suburb": suburb, "postCode": postcode}
+
+
+def geocode_address(address, http_session=None):
+    parsed = parse_address_for_nsw_service(address)
+    if not parsed:
+        return None, "unparseable"
+    s = http_session or session()
+    try:
+        params = dict(parsed)
+        params["projection"] = "EPSG:4326"
+        r = s.get(ADDRESS_SERVICE, params=params, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+        addresses = (((data or {}).get("addressResult") or {}).get("addresses") or [])
+        if not addresses:
+            return None, "no_match"
+        # Prefer an exact/official/assigned match where available.
+        chosen = addresses[0]
+        for candidate in addresses:
+            methods = ((data.get("addressResult") or {}).get("searchMethod") or {}).get("methodDescriptions", [])
+            if "Input parameters matched" in methods:
+                chosen = candidate
+                break
+        pt = chosen.get("addressPoint") or {}
+        lat = pt.get("centreY")
+        lon = pt.get("centreX")
+        if lat is None or lon is None:
+            return None, "no_point"
+        return (float(lat), float(lon)), "ok"
+    except Exception as exc:
+        return None, str(exc)
+
 def detail(html, row):
     soup = BeautifulSoup(html, "html.parser")
     text = clean(soup.get_text(" ", strip=True))
@@ -466,9 +580,33 @@ def main():
                     c.commit()
                     print(f"Enriched {i}/{len(filtered)} project details; failures={failures}")
 
+    # Fill missing map coordinates from the authoritative NSW Address Location
+    # Service. This is intentionally a separate pass so listing-only full imports
+    # also get usable map coordinates without requiring detail-page enrichment.
+    rows = c.execute("SELECT project_number,address FROM projects WHERE (lat IS NULL OR lon IS NULL) AND address IS NOT NULL AND address != ''").fetchall()
+    geo_ok = 0
+    geo_failed = 0
+    if rows:
+        print(f"Geocoding {len(rows)} projects with missing coordinates via NSW Address Location Service...")
+        def geo_one(item):
+            number, address = item
+            pt, reason = geocode_address(address)
+            return number, pt, reason
+        with ThreadPoolExecutor(max_workers=min(4, max(1, args.workers))) as pool:
+            futures = [pool.submit(geo_one, row) for row in rows]
+            for i, future in enumerate(as_completed(futures), 1):
+                number, pt, reason = future.result()
+                if pt:
+                    c.execute("UPDATE projects SET lat=?, lon=?, updated_at=? WHERE project_number=?", (pt[0], pt[1], datetime.now(timezone.utc).isoformat(), number))
+                    geo_ok += 1
+                else:
+                    geo_failed += 1
+                if i % 100 == 0:
+                    c.commit()
+                    print(f"Geocoded {i}/{len(rows)}; matched={geo_ok}, unresolved={geo_failed}")
     c.commit()
     c.close()
-    print(f"Sync complete: {len(filtered)} SSD/Part 3A records processed; detail failures={failures if args.details else 0}.")
+    print(f"Sync complete: {len(filtered)} SSD/Part 3A records processed; detail failures={failures if args.details else 0}; geocoded={geo_ok}; unresolved={geo_failed}.")
 
 
 if __name__ == "__main__":

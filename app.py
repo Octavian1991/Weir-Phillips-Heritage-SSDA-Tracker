@@ -285,7 +285,6 @@ with map_col:
                 continue
             lat, lon, precise = point
             if not precise:
-                lat, lon = jitter((lat, lon), p.get("project_number", ""))
                 approximate += 1
             else:
                 exact += 1
@@ -310,7 +309,7 @@ with map_col:
         if bounds:
             m.fit_bounds(bounds, padding=(20, 20))
         st_folium(m, height=500, width=None, key=map_key)
-        st.caption(f"{plotted:,} project locations shown ({exact:,} exact, {approximate:,} approximate). Approximate markers use the LGA centre with a small deterministic offset so multiple projects remain visible. OpenStreetMap base map.")
+        st.caption(f"{plotted:,} project locations shown ({exact:,} exact, {approximate:,} approximate). Exact markers use geocoded project addresses; unresolved records use an approximate LGA location. OpenStreetMap base map.")
     else:
         counts = {}
         for _, p in f.iterrows():
