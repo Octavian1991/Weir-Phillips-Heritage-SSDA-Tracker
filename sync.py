@@ -182,6 +182,24 @@ def listing(html):
 
 
 
+# Department of Planning's own point layer for exactly the SSD/SSI "Major
+# Projects" case set (its Case_status values - Open-Assessment,
+# Open-Determination, Pending-Exhibition, Open-PrepareSEARs, etc - line up
+# with the same case stages the public listing exposes). This is the
+# Department's own authoritative record of where it considers each case to
+# sit, including multi-lot/multi-address sites it has already resolved to a
+# single representative point. Prefer this over independently geocoding the
+# free-text Portal address wherever a match is found.
+#
+# NOTE: this has not been live-tested from within Claude's sandboxed dev
+# environment (the host is not reachable from that sandbox), so the join key
+# (Project_ID matched against our project_number) and the resulting coverage
+# percentage must be validated on the first real --full run. The coverage
+# report printed at the end of main() below is exactly for that purpose -
+# check it after the first run and adjust _project_key_variants() if the
+# match rate looks low.
+MAJOR_PROJECTS_LAYER = "https://mapprod3.environment.nsw.gov.au/arcgis/rest/services/REI/Major_Projects/MapServer/0/query"
+
 # NSW Spatial Services Address Location Service (GURAS-backed authoritative
 # NSW property addressing). It returns an address point in EPSG:4326.
 ADDRESS_SERVICE = "http://mapsq.six.nsw.gov.au/services/public/Address_Location"
@@ -294,6 +312,189 @@ def geocode_address(address, http_session=None):
         return (float(lat), float(lon)), "ok"
     except Exception as exc:
         return None, str(exc)
+
+def _project_key_variants(value):
+    """Normalise a project identifier into comparable lookup keys.
+
+    Portal project numbers look like SSD-12345678 or SSD-1234-Mod-3. The
+    ArcGIS Project_ID field's exact format has not been confirmed against
+    live data, so we generate a few plausible normalised variants and match
+    on any of them rather than assuming a single exact format.
+    """
+    v = clean(value).upper()
+    if not v:
+        return set()
+    stripped = re.sub(r"[^A-Z0-9]", "", v)
+    variants = {v, stripped}
+    variants.add(re.sub(r"^(SSD|SSI|MP|DA)[-_]?", "", v))
+    variants.add(re.sub(r"^(SSD|SSI|MP|DA)", "", stripped))
+    return {x for x in variants if x}
+
+
+def fetch_major_projects_points(http_session=None):
+    """Pull the DPE Major Projects point layer, indexed by project id.
+
+    Returns a dict: normalised_key -> (lat, lon, source_project_id).
+    Never raises - a failure here just means this source contributes zero
+    matches, and callers fall back to address geocoding.
+    """
+    s = http_session or session()
+    index = {}
+    offset = 0
+    page_size = 1000  # matches the layer's advertised maxRecordCount
+    total = 0
+    sample_ids = []
+    while True:
+        params = {
+            "where": "1=1",
+            "outFields": "Project_ID,Name,Case_status,Latitude,Longitude",
+            "returnGeometry": "false",
+            "resultOffset": offset,
+            "resultRecordCount": page_size,
+            "f": "json",
+        }
+        try:
+            r = s.get(MAJOR_PROJECTS_LAYER, params=params, timeout=60)
+            r.raise_for_status()
+            data = r.json()
+        except Exception as exc:
+            print(f"Major Projects spatial layer request failed at offset {offset}: {exc}")
+            break
+        if isinstance(data, dict) and data.get("error"):
+            print(f"Major Projects spatial layer returned an error: {data['error']}")
+            break
+        feats = data.get("features") or []
+        if not feats:
+            break
+        for feat in feats:
+            attrs = feat.get("attributes") or {}
+            lat, lon = attrs.get("Latitude"), attrs.get("Longitude")
+            pid = attrs.get("Project_ID") or attrs.get("Name")
+            if lat is None or lon is None or not pid:
+                continue
+            try:
+                lat, lon = float(lat), float(lon)
+            except (TypeError, ValueError):
+                continue
+            if not (-39.95 < lat < -22.7 and 141.0 < lon < 153.6):
+                continue
+            if len(sample_ids) < 10:
+                sample_ids.append(clean(pid))
+            for key in _project_key_variants(pid):
+                index.setdefault(key, (lat, lon, clean(pid)))
+        total += len(feats)
+        if len(feats) < page_size:
+            break
+        offset += page_size
+
+    print(f"Major Projects spatial layer: retrieved {total} records, indexed {len(index)} lookup keys.")
+    if sample_ids:
+        print(f"Sample Project_ID values from the layer: {sample_ids}")
+        print("If these don't resemble your SSD-xxxxxxxx project numbers, "
+              "_project_key_variants() needs adjusting before this source will match anything.")
+    return index
+
+
+def resolve_coordinates(c, args, s):
+    """Fill missing coordinates using the hierarchy described above the
+    MAJOR_PROJECTS_LAYER constant, and report coverage by source.
+
+    Never overwrites a coordinate that's already present (coordinate_source
+    'portal' is only ever set on rows that already had lat/lon from the
+    listing or a detail page - it is not re-geocoded or re-matched).
+    """
+    c.execute(
+        "UPDATE projects SET coordinate_source='portal' "
+        "WHERE lat IS NOT NULL AND lon IS NOT NULL "
+        "AND (coordinate_source IS NULL OR coordinate_source='')"
+    )
+    n_portal = c.execute(
+        "SELECT COUNT(*) FROM projects WHERE coordinate_source='portal'"
+    ).fetchone()[0]
+
+    portal_points = fetch_major_projects_points(s)
+
+    rows = c.execute(
+        "SELECT project_number, address FROM projects "
+        "WHERE lat IS NULL OR lon IS NULL"
+    ).fetchall()
+
+    n_dpe = 0
+    to_geocode = []
+    for number, address in rows:
+        matched = None
+        for key in _project_key_variants(number):
+            if key in portal_points:
+                matched = portal_points[key]
+                break
+        if matched:
+            lat, lon, _src_id = matched
+            c.execute(
+                "UPDATE projects SET lat=?, lon=?, coordinate_source='dpe_spatial', updated_at=? "
+                "WHERE project_number=?",
+                (lat, lon, datetime.now(timezone.utc).isoformat(), number),
+            )
+            n_dpe += 1
+        elif address:
+            to_geocode.append((number, address))
+        else:
+            c.execute(
+                "UPDATE projects SET coordinate_source='unresolved' WHERE project_number=?",
+                (number,),
+            )
+    c.commit()
+
+    n_geocoded = 0
+    n_unresolved = 0
+    if to_geocode:
+        print(f"Geocoding {len(to_geocode)} projects not found in the Major Projects spatial layer, "
+              "via NSW Address Location Service...")
+
+        def geo_one(item):
+            number, address = item
+            pt, reason = geocode_address(address)
+            return number, pt, reason
+
+        with ThreadPoolExecutor(max_workers=min(4, max(1, args.workers))) as pool:
+            futures = [pool.submit(geo_one, row) for row in to_geocode]
+            for i, future in enumerate(as_completed(futures), 1):
+                number, pt, reason = future.result()
+                if pt:
+                    c.execute(
+                        "UPDATE projects SET lat=?, lon=?, coordinate_source='address_service', updated_at=? "
+                        "WHERE project_number=?",
+                        (pt[0], pt[1], datetime.now(timezone.utc).isoformat(), number),
+                    )
+                    n_geocoded += 1
+                else:
+                    c.execute(
+                        "UPDATE projects SET coordinate_source='unresolved' WHERE project_number=?",
+                        (number,),
+                    )
+                    n_unresolved += 1
+                if i % 100 == 0:
+                    c.commit()
+                    print(f"Geocoded {i}/{len(to_geocode)}; matched={n_geocoded}, unresolved={n_unresolved}")
+    c.commit()
+
+    total = c.execute("SELECT COUNT(*) FROM projects").fetchone()[0]
+
+    def pct(n):
+        return f"{n} ({100 * n / total:.1f}%)" if total else str(n)
+
+    print("")
+    print("=== Coordinate coverage report ===")
+    print(f"Total projects in database:                     {total}")
+    print(f"  Already had Portal coordinates:                {pct(n_portal)}")
+    print(f"  Matched to DPE Major Projects spatial layer:    {pct(n_dpe)}")
+    print(f"  Geocoded via NSW Address Location Service:      {pct(n_geocoded)}")
+    print(f"  Unresolved (no reliable coordinate available):  {pct(n_unresolved)}")
+    accurate = n_portal + n_dpe
+    print(f"Accurately mappable (Portal + DPE spatial):       {pct(accurate)}")
+    print(f"Approximately mappable (address-geocoded):        {pct(n_geocoded)}")
+    print(f"Unmappable with current sources:                  {pct(n_unresolved)}")
+    print("===================================")
+
 
 def detail(html, row):
     soup = BeautifulSoup(html, "html.parser")
@@ -434,6 +635,11 @@ def init_db(c):
     existing = {r[1] for r in c.execute("PRAGMA table_info(projects)").fetchall()}
     if "gfa" not in existing:
         c.execute("ALTER TABLE projects ADD COLUMN gfa REAL")
+    if "coordinate_source" not in existing:
+        # Values: 'portal' (Portal-supplied coordinates), 'dpe_spatial'
+        # (matched against the Department's own Major Projects point layer),
+        # 'address_service' (geocoded from the Portal address), 'unresolved'.
+        c.execute("ALTER TABLE projects ADD COLUMN coordinate_source TEXT")
 
 
 def save_project(c, d):
@@ -465,7 +671,7 @@ def save_project(c, d):
         project_number,title,status,assessment_type,development_type,lga,address,description,url,decision,
         determination_date,last_modified,lat,lon,estimated_cost,dwellings,height,gfa,affordable_housing,applicant,updated_at)
         VALUES(:project_number,:title,:status,:assessment_type,:development_type,:lga,:address,:description,:url,:decision,
-        :determination_date,:last_modified,:lat,:lon,:estimated_cost,:dwellings,:height,:affordable_housing,:applicant,:updated_at)
+        :determination_date,:last_modified,:lat,:lon,:estimated_cost,:dwellings,:height,:gfa,:affordable_housing,:applicant,:updated_at)
         ON CONFLICT(project_number) DO UPDATE SET
         title=excluded.title,status=excluded.status,assessment_type=excluded.assessment_type,
         development_type=excluded.development_type,lga=excluded.lga,address=excluded.address,
@@ -580,33 +786,12 @@ def main():
                     c.commit()
                     print(f"Enriched {i}/{len(filtered)} project details; failures={failures}")
 
-    # Fill missing map coordinates from the authoritative NSW Address Location
-    # Service. This is intentionally a separate pass so listing-only full imports
-    # also get usable map coordinates without requiring detail-page enrichment.
-    rows = c.execute("SELECT project_number,address FROM projects WHERE (lat IS NULL OR lon IS NULL) AND address IS NOT NULL AND address != ''").fetchall()
-    geo_ok = 0
-    geo_failed = 0
-    if rows:
-        print(f"Geocoding {len(rows)} projects with missing coordinates via NSW Address Location Service...")
-        def geo_one(item):
-            number, address = item
-            pt, reason = geocode_address(address)
-            return number, pt, reason
-        with ThreadPoolExecutor(max_workers=min(4, max(1, args.workers))) as pool:
-            futures = [pool.submit(geo_one, row) for row in rows]
-            for i, future in enumerate(as_completed(futures), 1):
-                number, pt, reason = future.result()
-                if pt:
-                    c.execute("UPDATE projects SET lat=?, lon=?, updated_at=? WHERE project_number=?", (pt[0], pt[1], datetime.now(timezone.utc).isoformat(), number))
-                    geo_ok += 1
-                else:
-                    geo_failed += 1
-                if i % 100 == 0:
-                    c.commit()
-                    print(f"Geocoded {i}/{len(rows)}; matched={geo_ok}, unresolved={geo_failed}")
-    c.commit()
+    # Resolve coordinates using the hierarchy documented above
+    # MAJOR_PROJECTS_LAYER: existing Portal coordinates, then the DPE Major
+    # Projects spatial layer, then address geocoding, then unresolved.
+    resolve_coordinates(c, args, s)
     c.close()
-    print(f"Sync complete: {len(filtered)} SSD/Part 3A records processed; detail failures={failures if args.details else 0}; geocoded={geo_ok}; unresolved={geo_failed}.")
+    print(f"Sync complete: {len(filtered)} SSD/Part 3A records processed; detail failures={failures if args.details else 0}.")
 
 
 if __name__ == "__main__":

@@ -156,7 +156,7 @@ with st.sidebar:
     dtype = st.multiselect("Development type", type_options, key="type_filter", placeholder="All Development Types", label_visibility="collapsed")
 
     st.divider()
-    st.markdown('<div class="small-muted">The map and project table use the same filtered dataset. Click a table row to open its details. Exact project coordinates are preferred; LGA locations are used as an approximate fallback.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="small-muted">The map and project table use the same filtered dataset. Click a table row to open its details. Locations are shown in order of reliability: Portal coordinates, then DPE\'s own Major Projects spatial data, then a geocoded address; an LGA centroid is used only when none of those are available, and is always labelled as approximate.</div>', unsafe_allow_html=True)
 
 # ---------- Filtering ----------
 f = df.copy()
@@ -237,17 +237,34 @@ LGA_CENTROIDS = {
 }
 
 
+COORDINATE_SOURCE_LABELS = {
+    "portal": "Project coordinates (NSW Planning Portal)",
+    "dpe_spatial": "Official project location (DPE Major Projects spatial data)",
+    "address_service": "Geocoded address (NSW Address Location Service)",
+}
+
+
 def project_point(p):
+    """Return (lat, lon, precise, source_label) for a project, or None.
+
+    precise=True only for coordinates traceable to an authoritative source
+    (Portal-supplied or the DPE Major Projects spatial layer, or a
+    successful address geocode). precise=False means the point is an LGA
+    centroid fallback and must be labelled as approximate - never presented
+    as if it were the project's real location.
+    """
+    source = clean(p.get("coordinate_source")) or ""
     try:
         lat, lon = float(p.get("lat")), float(p.get("lon"))
         if -37 < lat < -28 and 140 < lon < 154:
-            return lat, lon, True
+            label = COORDINATE_SOURCE_LABELS.get(source, "Project coordinates")
+            return lat, lon, True, label
     except Exception:
         pass
     for lga_name in split_lgas(p.get("lga", "")):
         for name, xy in LGA_CENTROIDS.items():
             if norm(name) == norm(lga_name):
-                return xy[0], xy[1], False
+                return xy[0], xy[1], False, "Approximate LGA location (unresolved)"
     return None
 
 
@@ -283,7 +300,7 @@ with map_col:
             point = project_point(p)
             if not point:
                 continue
-            lat, lon, precise = point
+            lat, lon, precise, source_label = point
             if not precise:
                 approximate += 1
             else:
@@ -300,7 +317,7 @@ with map_col:
                 f"<br>{clean(p.get('title'))}"
                 f"<br><small>{clean(p.get('lga'))}</small>"
                 f"<br>Status: {clean(p.get('status'))}"
-                f"<br><small>{'Approximate LGA location' if not precise else 'Project coordinates'}</small>"
+                f"<br><small>{source_label}</small>"
                 f"{link_html}</div>"
             )
             popup = folium.Popup(popup_html, max_width=360)
@@ -309,7 +326,7 @@ with map_col:
         if bounds:
             m.fit_bounds(bounds, padding=(20, 20))
         st_folium(m, height=500, width=None, key=map_key)
-        st.caption(f"{plotted:,} project locations shown ({exact:,} exact, {approximate:,} approximate). Exact markers use geocoded project addresses; unresolved records use an approximate LGA location. OpenStreetMap base map.")
+        st.caption(f"{plotted:,} project locations shown ({exact:,} traceable to an official source, {approximate:,} approximate). Popups show whether a marker comes from Portal coordinates, DPE's Major Projects spatial data, a geocoded address, or an unresolved LGA fallback. OpenStreetMap base map.")
     else:
         counts = {}
         for _, p in f.iterrows():
